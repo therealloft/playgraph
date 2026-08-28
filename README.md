@@ -5,6 +5,8 @@ on Unity Playables. It provides animator-style state authoring, layers, blend
 trees, root motion, runtime debugging, contextual object animations, and APIs
 for controlling animation without requiring an Animator Controller.
 
+[View PlayGraph on GitHub](https://github.com/therealloft/playgraph)
+
 ## Features
 
 - Clip, playlist, one-shot, 1D blend tree, 2D blend tree, and direct blend
@@ -21,6 +23,29 @@ for controlling animation without requiring an Animator Controller.
 - Object-owned enter, loop, exit, and action animations
 - Optional integration with Unity's PlayableGraph Visualizer
 
+## Screenshots
+
+### Blend Tree Authoring
+
+![PlayGraph 2D locomotion blend tree editor](Documentation~/images/locomotion-blend-tree.png)
+
+Author a full 2D locomotion blend tree while viewing its motion graph, blend
+space, state settings, root-motion channels, and layer tabs in one window.
+
+### State Configuration And Preview
+
+![PlayGraph state conditions, interruptions, and animation preview](Documentation~/images/state-preview-and-transitions.png)
+
+Configure conditions, interruption scope, behaviours, events, Avatar Masks,
+and inspect the selected animation using the integrated model preview.
+
+### Layered Aiming
+
+![PlayGraph masked aiming layer and blend preview](Documentation~/images/layered-aiming-preview.png)
+
+Build masked upper-body animation layers and preview parameter-driven aiming
+motions without leaving the graph editor.
+
 ## Requirements
 
 - Unity 6 (`6000.0`) or newer
@@ -34,19 +59,13 @@ reference `UnityEditor` or require the PlayableGraph Visualizer package.
 In Unity, open **Window > Package Management > Package Manager**, select the
 `+` menu, and choose **Install package from git URL**.
 
-When this package is the repository root, enter:
+Enter:
 
 ```text
-https://github.com/<owner>/<repository>.git
+https://github.com/therealloft/playgraph.git
 ```
 
-When the package remains inside a Unity project's `Packages` directory, enter:
-
-```text
-https://github.com/<owner>/<repository>.git?path=/Packages/uk.co.realloft.playgraph
-```
-
-You can pin a tag or commit by appending `#<tag-or-commit>` to either URL.
+You can pin a tag or commit by appending `#<tag-or-commit>` to the URL.
 
 ## Quick Start
 
