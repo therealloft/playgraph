@@ -1,0 +1,22 @@
+{
+  "name": "uk.co.realloft.playgraph",
+  "displayName": "PlayGraph",
+  "version": "1.0.0",
+  "unity": "6000.0",
+  "description": "A graph-based animation and interaction framework built on Unity Playables, featuring animator-style state authoring, blend trees, layers, root motion, runtime debugging, and object-owned contextual animations.",
+  "license": "MIT",
+  "author": {
+    "name": "Stephen Padgham",
+	"url": "https://realloft.co.uk"
+  },
+  "keywords": [
+    "playable",
+    "graph",
+    "playablegraph",
+    "animation",
+    "animator",
+    "timeline"
+  ],
+  "dependencies": {
+  }
+}
