@@ -697,10 +697,6 @@ namespace Playgraph
                     DrawAnimationPreview(state);
             }
 
-            EditorGUILayout.Space(8f);
-            if (GUILayout.Button("Add Locomotion Template", GUILayout.Height(26f)))
-                AddLocomotionTemplate();
-
             EditorGUILayout.EndScrollView();
             EditorGUILayout.EndVertical();
         }
@@ -4610,101 +4606,6 @@ namespace Playgraph
                 name = UniqueParameterName("Parameter")
             });
             EditorUtility.SetDirty(graphAsset);
-        }
-
-        private void AddLocomotionTemplate()
-        {
-            Undo.RecordObject(graphAsset, "Add Playable Animator Template");
-
-            AddParameterIfMissing("Speed", PlayableParameterType.Float);
-            AddParameterIfMissing("MoveX", PlayableParameterType.Float);
-            AddParameterIfMissing("MoveY", PlayableParameterType.Float);
-            AddParameterIfMissing("Stance", PlayableParameterType.Enum);
-
-            PlayableLayer layer = new PlayableLayer
-            {
-                name = "Locomotion",
-                weight = 1f
-            };
-
-            layer.states.Add(new PlayableState
-            {
-                name = "Idle",
-                isDefault = true,
-                output = PlayableStateOutput.Clip,
-                fadeDuration = graphAsset.defaultFadeDuration
-            });
-
-            PlayableState locomotion = new PlayableState
-            {
-                name = "Move",
-                output = PlayableStateOutput.BlendTree2D,
-                blendParameterX = "MoveX",
-                blendParameterY = "MoveY",
-                blendTree2DType = PlayableBlendTree2DType.FreeformDirectional,
-                priority = 10,
-                fadeDuration = graphAsset.defaultFadeDuration
-            };
-            locomotion.conditions.Add(new PlayableCondition
-            {
-                parameter = "Speed",
-                mode = PlayableConditionMode.Greater,
-                floatValue = 0.05f
-            });
-            locomotion.motions.Add(new PlayableMotion
-            {
-                name = "Forward",
-                position = new Vector2(0f, 1f)
-            });
-            locomotion.motions.Add(new PlayableMotion
-            {
-                name = "Right",
-                position = new Vector2(1f, 0f)
-            });
-            locomotion.motions.Add(new PlayableMotion
-            {
-                name = "Back",
-                position = new Vector2(0f, -1f)
-            });
-            locomotion.motions.Add(new PlayableMotion
-            {
-                name = "Left",
-                position = new Vector2(-1f, 0f)
-            });
-            layer.states.Add(locomotion);
-
-            graphAsset.layers.Add(layer);
-            selectedLayer = graphAsset.layers.Count - 1;
-            selectedState = 0;
-            stateMachinePath.Clear();
-            EditorUtility.SetDirty(graphAsset);
-        }
-
-        private void AddParameterIfMissing(
-            string parameterName,
-            PlayableParameterType type)
-        {
-            if (graphAsset.FindParameter(parameterName) != null)
-                return;
-
-            PlayableParameter parameter = new PlayableParameter
-            {
-                name = parameterName,
-                type = type
-            };
-
-            if (type == PlayableParameterType.Enum)
-            {
-                parameter.enumOptions = new List<string>
-            {
-                "Relaxed",
-                "Combat",
-                "Crouched"
-            };
-                parameter.enumValue = "Relaxed";
-            }
-
-            graphAsset.parameters.Add(parameter);
         }
 
         private string UniqueParameterName(string baseName)
