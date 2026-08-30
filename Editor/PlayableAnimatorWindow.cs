@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.Animations;
 using UnityEngine.Playables;
@@ -9,11 +10,6 @@ namespace Playgraph
 {
     public sealed class PlayableAnimatorWindow : EditorWindow
     {
-        private static readonly string[] Tabs =
-        {
-        "Graph Asset",
-        "Runtime Debugger"
-    };
         private static readonly string[] LeftPanelTabs =
         {
         "States",
@@ -37,10 +33,32 @@ namespace Playgraph
         PlayableStateOutput.DirectBlend,
         PlayableStateOutput.OneShot
     };
+        private static readonly string[] StateEventTypeLabels =
+        {
+            "State Enter",
+            "State Exit",
+            "Normalized Time"
+        };
+        private static readonly int[] StateEventTypeValues =
+        {
+            (int)PlayableStateEventType.StateEnter,
+            (int)PlayableStateEventType.StateExit,
+            (int)PlayableStateEventType.NormalizedTime
+        };
+        private static readonly string[] BlendTreeEventTypeLabels =
+        {
+            "State Enter",
+            "State Exit"
+        };
+        private static readonly int[] BlendTreeEventTypeValues =
+        {
+            (int)PlayableStateEventType.StateEnter,
+            (int)PlayableStateEventType.StateExit
+        };
 
         private static readonly Color GridMajor = new Color(1f, 1f, 1f, 0.08f);
         private static readonly Color GridMinor = new Color(1f, 1f, 1f, 0.035f);
-        private static readonly Color Accent = new Color(1f, 0.48f, 0.04f, 1f);
+        private static readonly Color Accent = new Color(0.18f, 0.74f, 0.46f, 1f);
         private static readonly Color StateBlue = new Color(0.22f, 0.36f, 0.55f, 1f);
         private static readonly Color MotionBlue = new Color(0.15f, 0.18f, 0.24f, 1f);
         private const float DefaultSidebarWidth = 330f;
@@ -56,17 +74,18 @@ namespace Playgraph
         private const float BlendNodeGap = 8f;
         private const float BlendNodeColumnWidth = 215f;
 
-        private readonly List<PlayableAnimator> runtimeTargets =
-            new List<PlayableAnimator>();
-        private readonly List<PlayableParameterDebugInfo> parameterDebug =
-            new List<PlayableParameterDebugInfo>();
-        private readonly List<PlayableLayerDebugInfo> layerDebug =
-            new List<PlayableLayerDebugInfo>();
         private readonly List<PlayableState> stateMachinePath =
             new List<PlayableState>();
+        private readonly HashSet<PlayableParameter> expandedEnumParameters =
+            new HashSet<PlayableParameter>();
 
         private PlayableAnimatorGraph graphAsset;
+        private PlayableAnimatorGraph parameterListGraph;
         private PlayableAnimator runtimeTarget;
+        private ReorderableList parameterList;
+        private ReorderableList stateReorderableList;
+        private List<PlayableState> stateReorderableSource;
+        private PlayableState stateSelectionBeforeReorder;
         private PreviewRenderUtility previewUtility;
         private GameObject previewSource;
         private GameObject previewInstance;
@@ -78,12 +97,10 @@ namespace Playgraph
         private Vector2 stateListScroll;
         private Vector2 parameterScroll;
         private Vector2 inspectorScroll;
-        private Vector2 debuggerScroll;
         private Vector2 graphPan;
         private Vector2 previewOrbit = new Vector2(145f, 12f);
         private float sidebarWidth = DefaultSidebarWidth;
         private float inspectorWidth = DefaultInspectorWidth;
-        private int tabIndex;
         private int leftPanelTab;
         private int selectedLayer;
         private int selectedState;
@@ -114,7 +131,10 @@ namespace Playgraph
         private bool showPreview = true;
         private bool previewUseRuntimeTarget = true;
         private bool previewPlaying;
+        private bool parameterReorderUndoRecorded;
+        private bool stateReorderUndoRecorded;
         private bool suspendPreviewForPlayModeChange;
+        private int pendingParameterRemoval = -1;
 
         [MenuItem("Play Graph/Playable Animator")]
         public static void Open()
@@ -178,9 +198,6 @@ namespace Playgraph
 
         private void Update()
         {
-            if (Application.isPlaying && tabIndex == 1)
-                Repaint();
-
             TickPreviewAnimation();
         }
 
@@ -191,7 +208,7 @@ namespace Playgraph
 
         private void TickPreviewAnimation()
         {
-            if (!previewPlaying || tabIndex != 0 || !showPreview)
+            if (!previewPlaying || !showPreview)
             {
                 lastPreviewUpdateTime = EditorApplication.timeSinceStartup;
                 return;
@@ -216,13 +233,7 @@ namespace Playgraph
         private void OnGUI()
         {
             DrawToolbar();
-
-            tabIndex = GUILayout.Toolbar(tabIndex, Tabs);
-
-            if (tabIndex == 0)
-                DrawGraphAssetTab();
-            else
-                DrawRuntimeDebuggerTab();
+            DrawGraphAssetTab();
         }
 
         private void OnSelectionChanged()
@@ -304,6 +315,9 @@ namespace Playgraph
             if (GUILayout.Button("Ping", EditorStyles.toolbarButton))
                 EditorGUIUtility.PingObject(graphAsset);
             GUI.enabled = true;
+
+            if (GUILayout.Button("Debugger", EditorStyles.toolbarButton))
+                PlayableAnimatorDebuggerWindow.Open(runtimeTarget);
 
             GUI.enabled = runtimeTarget != null && Application.isPlaying;
             if (GUILayout.Button("Rebuild", EditorStyles.toolbarButton))
@@ -389,41 +403,12 @@ namespace Playgraph
                 stateListScroll,
                 GUILayout.ExpandHeight(true));
 
-            for (int i = 0; i < states.Count; i++)
-            {
-                PlayableState state = states[i];
-                string label = GetStateRowLabel(state, i);
-                bool selected = selectedState == i;
-
-                Color previousBackground = GUI.backgroundColor;
-                GUI.backgroundColor = selected
-                    ? new Color(0.36f, 0.52f, 0.75f, 1f)
-                    : previousBackground;
-
-                EditorGUILayout.BeginHorizontal();
-                if (GUILayout.Toggle(
-                        selected,
-                        label,
-                        "Button",
-                        GUILayout.Height(30f)))
-                {
-                    if (selectedState != i)
-                    {
-                        selectedState = i;
-                        selectedMotion = -1;
-                    }
-                }
-
-                if (state != null && state.IsSubStateMachine &&
-                    GUILayout.Button(">", GUILayout.Width(30f), GUILayout.Height(30f)))
-                {
-                    OpenSubStateMachine(state);
-                }
-
-                EditorGUILayout.EndHorizontal();
-
-                GUI.backgroundColor = previousBackground;
-            }
+            EnsureStateReorderableList(states);
+            stateReorderableList.index = Mathf.Clamp(
+                selectedState,
+                0,
+                states.Count - 1);
+            stateReorderableList.DoLayoutList();
 
             EditorGUILayout.EndScrollView();
             EditorGUILayout.Space(4f);
@@ -437,8 +422,140 @@ namespace Playgraph
 
             GUI.enabled = states.Count > 1;
             if (GUILayout.Button("Remove Selected", GUILayout.Height(22f)))
-                RemoveSelectedState(states);
+            {
+                if (ConfirmRemoveSelectedState(states))
+                    RemoveSelectedState(states);
+            }
             GUI.enabled = true;
+
+            EditorGUILayout.Space(4f);
+            showLayerSettings = DrawSectionHeader(
+                showLayerSettings,
+                "Layer Settings");
+            if (showLayerSettings)
+                DrawLayerSettings(layer);
+        }
+
+        private void EnsureStateReorderableList(List<PlayableState> states)
+        {
+            if (stateReorderableList != null &&
+                ReferenceEquals(stateReorderableSource, states))
+            {
+                return;
+            }
+
+            stateReorderableSource = states;
+            stateReorderableList = new ReorderableList(
+                states,
+                typeof(PlayableState),
+                true,
+                false,
+                false,
+                false)
+            {
+                headerHeight = 0f,
+                footerHeight = 0f,
+                elementHeight = StateRowHeight + 4f,
+                showDefaultBackground = false,
+                drawElementCallback = DrawStateElement,
+                drawNoneElementCallback = rect =>
+                    EditorGUI.LabelField(rect, "No states")
+            };
+
+            stateReorderableList.onSelectCallback = list =>
+            {
+                selectedState = Mathf.Clamp(
+                    list.index,
+                    0,
+                    stateReorderableSource.Count - 1);
+                selectedMotion = -1;
+            };
+            stateReorderableList.onMouseDragCallback = list =>
+            {
+                if (stateReorderUndoRecorded)
+                    return;
+
+                Undo.RecordObject(
+                    graphAsset,
+                    "Reorder Playable Animator State");
+                stateReorderUndoRecorded = true;
+                stateSelectionBeforeReorder =
+                    list.index >= 0 &&
+                    list.index < stateReorderableSource.Count
+                        ? stateReorderableSource[list.index]
+                        : null;
+            };
+            stateReorderableList.onMouseUpCallback = _ =>
+                stateReorderUndoRecorded = false;
+            stateReorderableList.onReorderCallback = list =>
+            {
+                int selectionIndex = stateSelectionBeforeReorder != null
+                    ? stateReorderableSource.IndexOf(stateSelectionBeforeReorder)
+                    : list.index;
+                selectedState = Mathf.Clamp(
+                    selectionIndex,
+                    0,
+                    stateReorderableSource.Count - 1);
+                list.index = selectedState;
+                selectedMotion = -1;
+                EditorUtility.SetDirty(graphAsset);
+                GUI.FocusControl(null);
+                Repaint();
+            };
+        }
+
+        private void DrawStateElement(
+            Rect rect,
+            int index,
+            bool isActive,
+            bool isFocused)
+        {
+            if (index < 0 || index >= stateReorderableSource.Count)
+                return;
+
+            PlayableState state = stateReorderableSource[index];
+            if (state == null)
+            {
+                state = new PlayableState();
+                stateReorderableSource[index] = state;
+            }
+
+            Rect rowRect = new Rect(
+                rect.x,
+                rect.y + 2f,
+                rect.width,
+                StateRowHeight);
+            Rect openRect = default;
+            if (state.IsSubStateMachine)
+            {
+                openRect = new Rect(
+                    rowRect.xMax - StateRowHeight,
+                    rowRect.y,
+                    StateRowHeight,
+                    rowRect.height);
+                rowRect.width -= StateRowHeight + 2f;
+            }
+
+            bool selected = selectedState == index;
+            Color previousBackground = GUI.backgroundColor;
+            if (selected)
+                GUI.backgroundColor = new Color(0.36f, 0.52f, 0.75f, 1f);
+
+            if (GUI.Toggle(
+                    rowRect,
+                    selected,
+                    GetStateRowLabel(state, index),
+                    "Button") && !selected)
+            {
+                selectedState = index;
+                selectedMotion = -1;
+                stateReorderableList.index = index;
+            }
+
+            GUI.backgroundColor = previousBackground;
+
+            if (state.IsSubStateMachine && GUI.Button(openRect, ">"))
+                OpenSubStateMachine(state);
         }
 
         private void DrawParametersPanel()
@@ -685,10 +802,6 @@ namespace Playgraph
                 if (showEvents)
                     DrawEvents(state);
             }
-
-            showLayerSettings = DrawSectionHeader(showLayerSettings, "Layer Settings");
-            if (showLayerSettings)
-                DrawLayerSettings(layer);
 
             if (!state.IsSubStateMachine)
             {
@@ -1714,11 +1827,11 @@ namespace Playgraph
             if (previewUtility == null || previewGrid != null)
                 return;
 
-            previewGrid = new GameObject("Thieves Preview Grid");
+            previewGrid = new GameObject("PlayGraph Preview Grid");
             previewGrid.hideFlags = HideFlags.HideAndDontSave;
             previewGridMesh = new Mesh
             {
-                name = "Thieves Preview Grid Mesh",
+                name = "PlayGraph Preview Grid Mesh",
                 hideFlags = HideFlags.HideAndDontSave
             };
 
@@ -1787,7 +1900,7 @@ namespace Playgraph
             List<int> indices = new List<int>();
             Color minor = new Color(1f, 1f, 1f, 0.14f);
             Color major = new Color(1f, 1f, 1f, 0.28f);
-            Color trail = new Color(1f, 0.5f, 0f, 0.9f);
+            Color trail = new Color(Accent.r, Accent.g, Accent.b, 0.9f);
 
             for (int i = -lineRadius; i <= lineRadius; i++)
             {
@@ -2537,8 +2650,16 @@ namespace Playgraph
                     ? parameter.type
                     : PlayableParameterType.Float;
 
-                condition.mode = DrawConditionMode(condition.mode, type);
-                DrawConditionValue(condition, parameter, type);
+                if (type == PlayableParameterType.Trigger)
+                {
+                    condition.mode = PlayableConditionMode.Equals;
+                    condition.boolValue = false;
+                }
+                else
+                {
+                    condition.mode = DrawConditionMode(condition.mode, type);
+                    DrawConditionValue(condition, parameter, type);
+                }
 
                 EditorGUILayout.EndVertical();
 
@@ -2551,10 +2672,14 @@ namespace Playgraph
 
             if (GUILayout.Button("Add Condition"))
             {
+                string parameterName = FirstParameterName();
+                PlayableParameter parameter =
+                    graphAsset.FindParameter(parameterName);
                 state.conditions.Add(new PlayableCondition
                 {
-                    parameter = FirstParameterName(),
-                    boolValue = true
+                    parameter = parameterName,
+                    boolValue = parameter != null &&
+                                parameter.type == PlayableParameterType.Bool
                 });
             }
         }
@@ -2712,27 +2837,22 @@ namespace Playgraph
                     remove = true;
                 EditorGUILayout.EndHorizontal();
 
-                stateEvent.timeMode =
-                    (PlayableEventTimeMode)EditorGUILayout.EnumPopup(
-                        "Time Mode",
-                        stateEvent.timeMode);
-                if (stateEvent.timeMode == PlayableEventTimeMode.Seconds)
-                {
-                    stateEvent.seconds = Mathf.Max(
-                        0f,
-                        EditorGUILayout.FloatField("Seconds", stateEvent.seconds));
-                }
-                else
+                stateEvent.type = DrawStateEventTypePopup(
+                    state,
+                    stateEvent.type);
+                if (stateEvent.type == PlayableStateEventType.NormalizedTime)
                 {
                     stateEvent.normalizedTime = Mathf.Max(
                         0f,
                         EditorGUILayout.FloatField(
                             "Normalized Time",
                             stateEvent.normalizedTime));
+                    stateEvent.trigger =
+                        (PlayableStateEventTrigger)EditorGUILayout.EnumPopup(
+                            "Trigger",
+                            stateEvent.trigger);
                 }
 
-                stateEvent.everyLoop =
-                    EditorGUILayout.Toggle("Every Loop", stateEvent.everyLoop);
                 DrawStateEventCallback(i);
                 EditorGUILayout.EndVertical();
 
@@ -2748,9 +2868,42 @@ namespace Playgraph
             if (GUILayout.Button("Add Event"))
             {
                 Undo.RecordObject(graphAsset, "Add Playable State Event");
-                state.events.Add(new PlayableStateEvent());
+                state.events.Add(new PlayableStateEvent
+                {
+                    type = IsBlendOutput(state)
+                        ? PlayableStateEventType.StateEnter
+                        : PlayableStateEventType.NormalizedTime
+                });
                 EditorUtility.SetDirty(graphAsset);
             }
+        }
+
+        private PlayableStateEventType DrawStateEventTypePopup(
+            PlayableState state,
+            PlayableStateEventType eventType)
+        {
+            bool blendTree = IsBlendOutput(state);
+            if (blendTree && eventType == PlayableStateEventType.NormalizedTime)
+            {
+                Undo.RecordObject(
+                    graphAsset,
+                    "Change Playable State Event Type");
+                eventType = PlayableStateEventType.StateEnter;
+                EditorUtility.SetDirty(graphAsset);
+            }
+
+            string[] labels = blendTree
+                ? BlendTreeEventTypeLabels
+                : StateEventTypeLabels;
+            int[] values = blendTree
+                ? BlendTreeEventTypeValues
+                : StateEventTypeValues;
+            int nextValue = EditorGUILayout.IntPopup(
+                "Type",
+                (int)eventType,
+                labels,
+                values);
+            return (PlayableStateEventType)nextValue;
         }
 
         private void DrawLayerSettings(PlayableLayer layer)
@@ -2874,267 +3027,212 @@ namespace Playgraph
             if (graphAsset.parameters == null)
                 graphAsset.parameters = new List<PlayableParameter>();
 
-            for (int i = 0; i < graphAsset.parameters.Count; i++)
+            EnsureParameterList();
+            pendingParameterRemoval = -1;
+            parameterList.DoLayoutList();
+
+            if (pendingParameterRemoval >= 0)
             {
-                PlayableParameter parameter = graphAsset.parameters[i];
-                if (parameter == null)
-                {
-                    parameter = new PlayableParameter();
-                    graphAsset.parameters[i] = parameter;
-                }
-
-                bool remove = false;
-                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                EditorGUILayout.BeginHorizontal();
-                parameter.name = EditorGUILayout.TextField(
-                    parameter.name,
-                    GUILayout.MinWidth(92f));
-                parameter.type =
-                    (PlayableParameterType)EditorGUILayout.EnumPopup(
-                        parameter.type,
-                        GUILayout.Width(70f));
-                DrawParameterDefaultInline(parameter);
-                if (GUILayout.Button("X", GUILayout.Width(24f)))
-                    remove = true;
-                EditorGUILayout.EndHorizontal();
-
-                if (parameter.type == PlayableParameterType.Enum)
-                    DrawEnumOptions(parameter);
-
-                EditorGUILayout.EndVertical();
-
-                if (remove)
-                {
-                    graphAsset.parameters.RemoveAt(i);
-                    break;
-                }
+                RemoveParameter(pendingParameterRemoval);
+                pendingParameterRemoval = -1;
             }
 
             if (includeAddButton && GUILayout.Button("Add Parameter"))
                 AddParameter();
         }
 
-        private void DrawParameterDefaultInline(
+        private void EnsureParameterList()
+        {
+            if (parameterList != null && parameterListGraph == graphAsset &&
+                ReferenceEquals(parameterList.list, graphAsset.parameters))
+            {
+                return;
+            }
+
+            parameterListGraph = graphAsset;
+            parameterList = new ReorderableList(
+                graphAsset.parameters,
+                typeof(PlayableParameter),
+                true,
+                false,
+                false,
+                false)
+            {
+                headerHeight = 0f,
+                footerHeight = 0f,
+                showDefaultBackground = false,
+                drawElementCallback = DrawParameterElement,
+                elementHeightCallback = GetParameterElementHeight,
+                drawNoneElementCallback = rect =>
+                    EditorGUI.LabelField(rect, "No parameters")
+            };
+
+            parameterList.onMouseDragCallback = _ =>
+            {
+                if (parameterReorderUndoRecorded)
+                    return;
+
+                Undo.RecordObject(
+                    graphAsset,
+                    "Reorder Playable Animator Parameter");
+                parameterReorderUndoRecorded = true;
+            };
+            parameterList.onMouseUpCallback = _ =>
+                parameterReorderUndoRecorded = false;
+            parameterList.onReorderCallback = _ =>
+            {
+                EditorUtility.SetDirty(graphAsset);
+                GUI.FocusControl(null);
+                Repaint();
+            };
+        }
+
+        private float GetParameterElementHeight(int index)
+        {
+            float lineHeight = EditorGUIUtility.singleLineHeight;
+            float spacing = EditorGUIUtility.standardVerticalSpacing;
+            if (index < 0 || index >= graphAsset.parameters.Count)
+                return 8f + lineHeight * 2f + spacing;
+
+            PlayableParameter parameter = graphAsset.parameters[index];
+            bool hasDefault = parameter == null ||
+                              parameter.type != PlayableParameterType.Trigger;
+            float height = 8f + lineHeight * (hasDefault ? 2f : 1f) +
+                           (hasDefault ? spacing : 0f);
+            if (parameter == null || parameter.type != PlayableParameterType.Enum)
+                return height;
+
+            height += spacing + lineHeight;
+            if (expandedEnumParameters.Contains(parameter))
+            {
+                EnsureEnumOptions(parameter);
+                height += (lineHeight + spacing) *
+                    (parameter.enumOptions.Count + 1);
+            }
+
+            return height;
+        }
+
+        private void DrawParameterElement(
+            Rect rect,
+            int index,
+            bool isActive,
+            bool isFocused)
+        {
+            if (index < 0 || index >= graphAsset.parameters.Count)
+                return;
+
+            PlayableParameter parameter = graphAsset.parameters[index];
+            if (parameter == null)
+            {
+                parameter = new PlayableParameter();
+                graphAsset.parameters[index] = parameter;
+            }
+
+            Rect cardRect = new Rect(
+                rect.x,
+                rect.y + 1f,
+                rect.width,
+                rect.height - 2f);
+            GUI.Box(cardRect, GUIContent.none, EditorStyles.helpBox);
+
+            float lineHeight = EditorGUIUtility.singleLineHeight;
+            float spacing = EditorGUIUtility.standardVerticalSpacing;
+            Rect lineRect = new Rect(
+                cardRect.x + 5f,
+                cardRect.y + 4f,
+                cardRect.width - 10f,
+                lineHeight);
+
+            const float removeWidth = 24f;
+            const float typeWidth = 82f;
+            Rect removeRect = new Rect(
+                lineRect.xMax - removeWidth,
+                lineRect.y,
+                removeWidth,
+                lineHeight);
+            Rect typeRect = new Rect(
+                removeRect.x - spacing - typeWidth,
+                lineRect.y,
+                typeWidth,
+                lineHeight);
+            Rect nameRect = new Rect(
+                lineRect.x,
+                lineRect.y,
+                Mathf.Max(40f, typeRect.x - spacing - lineRect.x),
+                lineHeight);
+
+            parameter.name = EditorGUI.TextField(nameRect, parameter.name);
+            parameter.type = (PlayableParameterType)EditorGUI.EnumPopup(
+                typeRect,
+                parameter.type);
+            if (GUI.Button(
+                    removeRect,
+                    new GUIContent("X", "Remove parameter"),
+                    EditorStyles.miniButton))
+            {
+                pendingParameterRemoval = index;
+            }
+
+            if (parameter.type == PlayableParameterType.Trigger)
+                return;
+
+            lineRect.y += lineHeight + spacing;
+            DrawParameterDefault(lineRect, parameter);
+
+            if (parameter.type != PlayableParameterType.Enum)
+                return;
+
+            EnsureEnumOptions(parameter);
+            lineRect.y += lineHeight + spacing;
+            DrawParameterEnumOptions(lineRect, parameter);
+        }
+
+        private void DrawParameterDefault(
+            Rect rect,
             PlayableParameter parameter)
         {
-            GUILayout.Label(
-                "Default",
-                EditorStyles.miniLabel,
-                GUILayout.Width(42f));
+            const float labelWidth = 48f;
+            Rect labelRect = new Rect(
+                rect.x,
+                rect.y,
+                labelWidth,
+                rect.height);
+            Rect valueRect = new Rect(
+                labelRect.xMax,
+                rect.y,
+                rect.width - labelWidth,
+                rect.height);
+            EditorGUI.LabelField(labelRect, "Default", EditorStyles.miniLabel);
 
             switch (parameter.type)
             {
                 case PlayableParameterType.Bool:
-                case PlayableParameterType.Trigger:
-                    parameter.boolValue =
-                        EditorGUILayout.Toggle(
-                            parameter.boolValue,
-                            GUILayout.Width(18f));
+                    parameter.boolValue = EditorGUI.Toggle(
+                        new Rect(valueRect.x, valueRect.y, 18f, valueRect.height),
+                        parameter.boolValue);
                     break;
                 case PlayableParameterType.Integer:
-                    parameter.intValue =
-                        EditorGUILayout.IntField(
-                            parameter.intValue,
-                            GUILayout.Width(52f));
+                    parameter.intValue = EditorGUI.IntField(
+                        valueRect,
+                        parameter.intValue);
                     break;
                 case PlayableParameterType.Enum:
                     EnsureEnumOptions(parameter);
-                    parameter.enumValue = EnumOptionPopupInline(
-                        parameter,
-                        parameter.enumValue,
-                        GUILayout.MinWidth(62f));
+                    int currentIndex = Mathf.Max(
+                        0,
+                        parameter.enumOptions.IndexOf(parameter.enumValue));
+                    int nextIndex = EditorGUI.Popup(
+                        valueRect,
+                        currentIndex,
+                        parameter.enumOptions.ToArray());
+                    parameter.enumValue = parameter.enumOptions[nextIndex];
                     break;
                 default:
-                    parameter.floatValue =
-                        EditorGUILayout.FloatField(
-                            parameter.floatValue,
-                            GUILayout.Width(52f));
+                    parameter.floatValue = EditorGUI.FloatField(
+                        valueRect,
+                        parameter.floatValue);
                     break;
-            }
-        }
-
-        private void DrawRuntimeDebuggerTab()
-        {
-            DrawRuntimeTargetPicker();
-
-            if (!Application.isPlaying)
-            {
-                EditorGUILayout.HelpBox(
-                    "Enter Play Mode to inspect live playable weights.",
-                    MessageType.Info);
-            }
-
-            if (runtimeTarget == null)
-            {
-                EditorGUILayout.HelpBox(
-                    "Select a GameObject with PlayableAnimator.",
-                    MessageType.Info);
-                return;
-            }
-
-            debuggerScroll = EditorGUILayout.BeginScrollView(debuggerScroll);
-
-            EditorGUILayout.LabelField("Runtime", EditorStyles.boldLabel);
-            EditorGUILayout.LabelField("Animator", ObjectName(runtimeTarget.Animator));
-            EditorGUILayout.LabelField("Graph", ObjectName(runtimeTarget.GraphAsset));
-            EditorGUILayout.LabelField(
-                "Playable Graph",
-                runtimeTarget.IsGraphValid ? "Valid" : "Not running");
-
-            EditorGUILayout.BeginHorizontal();
-            GUI.enabled = Application.isPlaying;
-            if (GUILayout.Button("Initialize/Rebuild"))
-                runtimeTarget.RebuildGraph();
-            if (GUILayout.Button("Destroy Graph"))
-                runtimeTarget.DestroyGraph();
-            GUI.enabled = true;
-            EditorGUILayout.EndHorizontal();
-
-            EditorGUILayout.Space(8f);
-            DrawRuntimeParameters();
-            EditorGUILayout.Space(8f);
-            DrawRuntimeLayers();
-
-            EditorGUILayout.EndScrollView();
-        }
-
-        private void DrawRuntimeTargetPicker()
-        {
-            EditorGUILayout.BeginHorizontal();
-            runtimeTarget = (PlayableAnimator)EditorGUILayout.ObjectField(
-                "Target",
-                runtimeTarget,
-                typeof(PlayableAnimator),
-                true);
-
-            if (GUILayout.Button("Refresh", GUILayout.Width(80f)))
-                GatherRuntimeTargets(runtimeTargets);
-
-            EditorGUILayout.EndHorizontal();
-
-            GatherRuntimeTargets(runtimeTargets);
-            if (runtimeTargets.Count == 0)
-                return;
-
-            EditorGUILayout.BeginHorizontal();
-            EditorGUILayout.LabelField("Scene Targets", GUILayout.Width(110f));
-            for (int i = 0; i < runtimeTargets.Count; i++)
-            {
-                PlayableAnimator target = runtimeTargets[i];
-                if (GUILayout.Button(target.name, GUILayout.MaxWidth(180f)))
-                {
-                    runtimeTarget = target;
-                    if (runtimeTarget.GraphAsset != null)
-                        graphAsset = runtimeTarget.GraphAsset;
-                }
-            }
-
-            EditorGUILayout.EndHorizontal();
-        }
-
-        private void DrawRuntimeParameters()
-        {
-            EditorGUILayout.LabelField("Parameters", EditorStyles.boldLabel);
-
-            runtimeTarget.GetParameterSnapshot(parameterDebug);
-            if (parameterDebug.Count == 0)
-            {
-                EditorGUILayout.HelpBox(
-                    "No runtime parameters are defined.",
-                    MessageType.None);
-                return;
-            }
-
-            for (int i = 0; i < parameterDebug.Count; i++)
-            {
-                PlayableParameterDebugInfo parameter = parameterDebug[i];
-                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
-                EditorGUILayout.LabelField(parameter.Name, GUILayout.Width(160f));
-
-                GUI.enabled = Application.isPlaying;
-                switch (parameter.Type)
-                {
-                    case PlayableParameterType.Bool:
-                        bool boolValue =
-                            EditorGUILayout.Toggle(parameter.BoolValue);
-                        if (boolValue != parameter.BoolValue)
-                            runtimeTarget.SetBool(parameter.Name, boolValue);
-                        break;
-
-                    case PlayableParameterType.Integer:
-                        int intValue =
-                            EditorGUILayout.IntField(parameter.IntValue);
-                        if (intValue != parameter.IntValue)
-                            runtimeTarget.SetInteger(parameter.Name, intValue);
-                        break;
-
-                    case PlayableParameterType.Trigger:
-                        if (GUILayout.Button("Trigger"))
-                            runtimeTarget.SetTrigger(parameter.Name);
-                        break;
-
-                    case PlayableParameterType.Enum:
-                        string enumValue = RuntimeEnumPopup(parameter);
-                        if (enumValue != parameter.EnumValue)
-                            runtimeTarget.SetEnum(parameter.Name, enumValue);
-                        break;
-
-                    default:
-                        float floatValue =
-                            EditorGUILayout.FloatField(parameter.FloatValue);
-                        if (!Mathf.Approximately(floatValue, parameter.FloatValue))
-                            runtimeTarget.SetFloat(parameter.Name, floatValue);
-                        break;
-                }
-
-                GUI.enabled = true;
-                EditorGUILayout.EndHorizontal();
-            }
-        }
-
-        private void DrawRuntimeLayers()
-        {
-            EditorGUILayout.LabelField("Layers", EditorStyles.boldLabel);
-
-            runtimeTarget.GetLayerSnapshot(layerDebug);
-            if (layerDebug.Count == 0)
-            {
-                EditorGUILayout.HelpBox(
-                    "No live layers. Rebuild the runtime graph in Play Mode.",
-                    MessageType.None);
-                return;
-            }
-
-            for (int i = 0; i < layerDebug.Count; i++)
-            {
-                PlayableLayerDebugInfo layer = layerDebug[i];
-                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                DrawWeightBar(
-                    $"{layer.Name} - {layer.ActiveState}",
-                    layer.Weight,
-                    18f);
-
-                for (int j = 0; j < layer.States.Count; j++)
-                {
-                    PlayableStateDebugInfo state = layer.States[j];
-                    DrawWeightBar(
-                        $"{state.Name} [{state.Output}]",
-                        state.Weight,
-                        16f);
-
-                    for (int k = 0; k < state.Motions.Count; k++)
-                    {
-                        PlayableMotionDebugInfo motion = state.Motions[k];
-                        EditorGUI.indentLevel++;
-                        DrawWeightBar(
-                            $"{motion.Name} ({motion.ClipName})",
-                            motion.Weight,
-                            14f);
-                        EditorGUI.indentLevel--;
-                    }
-                }
-
-                EditorGUILayout.EndVertical();
             }
         }
 
@@ -3304,7 +3402,6 @@ namespace Playgraph
             PlayableParameterType type)
         {
             if (type != PlayableParameterType.Bool &&
-                type != PlayableParameterType.Trigger &&
                 type != PlayableParameterType.Enum)
             {
                 return (PlayableConditionMode)EditorGUILayout.EnumPopup(
@@ -3332,7 +3429,6 @@ namespace Playgraph
             switch (type)
             {
                 case PlayableParameterType.Bool:
-                case PlayableParameterType.Trigger:
                     condition.boolValue =
                         EditorGUILayout.Toggle("Value", condition.boolValue);
                     break;
@@ -3365,36 +3461,79 @@ namespace Playgraph
             }
         }
 
-        private void DrawEnumOptions(PlayableParameter parameter)
+        private void DrawParameterEnumOptions(
+            Rect lineRect,
+            PlayableParameter parameter)
         {
             EnsureEnumOptions(parameter);
 
-            EditorGUILayout.LabelField("Enum Options", EditorStyles.miniBoldLabel);
+            bool expanded = expandedEnumParameters.Contains(parameter);
+            bool nextExpanded = EditorGUI.Foldout(
+                lineRect,
+                expanded,
+                $"Enum Options ({parameter.enumOptions.Count})",
+                true);
+
+            if (nextExpanded != expanded)
+            {
+                if (nextExpanded)
+                    expandedEnumParameters.Add(parameter);
+                else
+                    expandedEnumParameters.Remove(parameter);
+            }
+
+            if (!nextExpanded)
+                return;
+
+            float lineHeight = EditorGUIUtility.singleLineHeight;
+            float spacing = EditorGUIUtility.standardVerticalSpacing;
+            int removeIndex = -1;
             for (int i = 0; i < parameter.enumOptions.Count; i++)
             {
-                bool remove = false;
-                EditorGUILayout.BeginHorizontal();
-                parameter.enumOptions[i] = EditorGUILayout.TextField(
+                lineRect.y += lineHeight + spacing;
+                Rect removeRect = new Rect(
+                    lineRect.xMax - 24f,
+                    lineRect.y,
+                    24f,
+                    lineHeight);
+                Rect valueRect = new Rect(
+                    lineRect.x,
+                    lineRect.y,
+                    removeRect.x - spacing - lineRect.x,
+                    lineHeight);
+                parameter.enumOptions[i] = EditorGUI.TextField(
+                    valueRect,
                     parameter.enumOptions[i]);
 
-                GUI.enabled = parameter.enumOptions.Count > 1;
-                if (GUILayout.Button("X", GUILayout.Width(24f)))
-                    remove = true;
-                GUI.enabled = true;
-
-                EditorGUILayout.EndHorizontal();
-
-                if (remove)
+                using (new EditorGUI.DisabledScope(
+                           parameter.enumOptions.Count <= 1))
                 {
-                    parameter.enumOptions.RemoveAt(i);
-                    if (!parameter.enumOptions.Contains(parameter.enumValue))
-                        parameter.enumValue = parameter.enumOptions[0];
-                    break;
+                    if (GUI.Button(
+                            removeRect,
+                            new GUIContent("X", "Remove enum option"),
+                            EditorStyles.miniButton))
+                    {
+                        removeIndex = i;
+                    }
                 }
             }
 
-            if (GUILayout.Button("Add Enum Option"))
+            lineRect.y += lineHeight + spacing;
+            if (GUI.Button(lineRect, "Add Enum Option"))
+            {
+                Undo.RecordObject(graphAsset, "Add Playable Animator Enum Option");
                 parameter.enumOptions.Add($"Value {parameter.enumOptions.Count + 1}");
+                EditorUtility.SetDirty(graphAsset);
+            }
+
+            if (removeIndex < 0)
+                return;
+
+            Undo.RecordObject(graphAsset, "Remove Playable Animator Enum Option");
+            parameter.enumOptions.RemoveAt(removeIndex);
+            if (!parameter.enumOptions.Contains(parameter.enumValue))
+                parameter.enumValue = parameter.enumOptions[0];
+            EditorUtility.SetDirty(graphAsset);
         }
 
         private string ParameterPopup(string label, string current)
@@ -3557,42 +3696,6 @@ namespace Playgraph
                 index,
                 parameter.enumOptions.ToArray());
             return parameter.enumOptions[nextIndex];
-        }
-
-        private string EnumOptionPopupInline(
-            PlayableParameter parameter,
-            string current,
-            params GUILayoutOption[] options)
-        {
-            EnsureEnumOptions(parameter);
-
-            int index = parameter.enumOptions.IndexOf(current);
-            if (index < 0)
-            {
-                current = parameter.enumOptions[0];
-                index = 0;
-            }
-
-            int nextIndex = EditorGUILayout.Popup(
-                index,
-                parameter.enumOptions.ToArray(),
-                options);
-            return parameter.enumOptions[nextIndex];
-        }
-
-        private string RuntimeEnumPopup(PlayableParameterDebugInfo parameter)
-        {
-            if (parameter.EnumOptions == null || parameter.EnumOptions.Count == 0)
-                return EditorGUILayout.TextField(parameter.EnumValue);
-
-            int index = parameter.EnumOptions.IndexOf(parameter.EnumValue);
-            if (index < 0)
-                index = 0;
-
-            int nextIndex = EditorGUILayout.Popup(
-                index,
-                parameter.EnumOptions.ToArray());
-            return parameter.EnumOptions[nextIndex];
         }
 
         private void EnsureEnumOptions(PlayableParameter parameter)
@@ -4112,18 +4215,6 @@ namespace Playgraph
             previewRootMotionTime = previewTime;
         }
 
-        private void DrawWeightBar(string label, float weight, float height)
-        {
-            Rect rect = GUILayoutUtility.GetRect(
-                1f,
-                height,
-                GUILayout.ExpandWidth(true));
-            EditorGUI.ProgressBar(
-                rect,
-                Mathf.Clamp01(weight),
-                $"{label} {weight:0.00}");
-        }
-
         private void DrawGrid(Rect rect, float spacing, Color color)
         {
             DrawGrid(rect, spacing, color, Vector2.zero);
@@ -4574,6 +4665,29 @@ namespace Playgraph
             EditorUtility.SetDirty(graphAsset);
         }
 
+        private bool ConfirmRemoveSelectedState(List<PlayableState> states)
+        {
+            if (states == null || selectedState < 0 ||
+                selectedState >= states.Count)
+            {
+                return false;
+            }
+
+            PlayableState state = states[selectedState];
+            string stateName = state != null
+                ? state.DisplayName
+                : $"State {selectedState + 1}";
+            string detail = state != null && state.IsSubStateMachine
+                ? " This also removes every state inside it."
+                : string.Empty;
+
+            return EditorUtility.DisplayDialog(
+                "Remove State",
+                $"Are you sure you want to remove \"{stateName}\"?{detail}",
+                "Remove",
+                "Cancel");
+        }
+
         private void RemoveSelectedState(List<PlayableState> states)
         {
             Undo.RecordObject(graphAsset, "Remove Playable Animator State");
@@ -4606,6 +4720,21 @@ namespace Playgraph
                 name = UniqueParameterName("Parameter")
             });
             EditorUtility.SetDirty(graphAsset);
+        }
+
+        private void RemoveParameter(int index)
+        {
+            if (graphAsset == null || graphAsset.parameters == null ||
+                index < 0 || index >= graphAsset.parameters.Count)
+            {
+                return;
+            }
+
+            Undo.RecordObject(graphAsset, "Remove Playable Animator Parameter");
+            expandedEnumParameters.Remove(graphAsset.parameters[index]);
+            graphAsset.parameters.RemoveAt(index);
+            EditorUtility.SetDirty(graphAsset);
+            GUI.FocusControl(null);
         }
 
         private string UniqueParameterName(string baseName)
@@ -4659,27 +4788,6 @@ namespace Playgraph
             Selection.activeObject = asset;
         }
 
-        private static void GatherRuntimeTargets(
-            List<PlayableAnimator> results)
-        {
-            results.Clear();
-            PlayableAnimator[] targets =
-                Resources.FindObjectsOfTypeAll<PlayableAnimator>();
-
-            for (int i = 0; i < targets.Length; i++)
-            {
-                PlayableAnimator target = targets[i];
-                if (target == null || EditorUtility.IsPersistent(target))
-                    continue;
-
-                results.Add(target);
-            }
-        }
-
-        private static string ObjectName(Object target)
-        {
-            return target != null ? target.name : "(none)";
-        }
     }
 
     [CustomEditor(typeof(PlayableAnimator))]
@@ -4693,12 +4801,16 @@ namespace Playgraph
                 (PlayableAnimator)target;
 
             EditorGUILayout.Space(6f);
+            EditorGUILayout.BeginHorizontal();
             if (GUILayout.Button("Open Playable Animator Window"))
             {
                 PlayableAnimatorWindow.Open(
                     animator.GraphAsset,
                     animator);
             }
+            if (GUILayout.Button("Open Runtime Debugger"))
+                PlayableAnimatorDebuggerWindow.Open(animator);
+            EditorGUILayout.EndHorizontal();
 
             GUI.enabled = Application.isPlaying;
             EditorGUILayout.BeginHorizontal();

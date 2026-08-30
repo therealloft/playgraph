@@ -80,8 +80,8 @@ namespace Playgraph
         }
 
         /// <summary>
-        /// Clears per-physics-step commands. The ability coordinator calls this
-        /// before ticking abilities.
+        /// Clears commands submitted during the previous physics step.
+        /// Call this before submitting movement for the next simulation.
         /// </summary>
         public void BeginSimulationStep()
         {

@@ -62,10 +62,17 @@ namespace Playgraph
         AfterExitTime
     }
 
-    public enum PlayableEventTimeMode
+    public enum PlayableStateEventType
     {
         NormalizedTime,
-        Seconds
+        StateEnter,
+        StateExit
+    }
+
+    public enum PlayableStateEventTrigger
+    {
+        OncePerState,
+        OncePerLoop
     }
 
     [Serializable]
@@ -113,11 +120,11 @@ namespace Playgraph
     {
         public string name = "Event";
         public bool enabled = true;
-        public PlayableEventTimeMode timeMode =
-            PlayableEventTimeMode.NormalizedTime;
+        public PlayableStateEventType type =
+            PlayableStateEventType.NormalizedTime;
+        public PlayableStateEventTrigger trigger =
+            PlayableStateEventTrigger.OncePerState;
         [Min(0f)] public float normalizedTime;
-        [Min(0f)] public float seconds;
-        public bool everyLoop;
         public UnityEvent callback = new UnityEvent();
     }
 
@@ -469,6 +476,9 @@ namespace Playgraph
 
                 if (parameters[i].enumOptions == null)
                     parameters[i].enumOptions = new List<string>();
+
+                if (parameters[i].type == PlayableParameterType.Trigger)
+                    parameters[i].boolValue = false;
 
                 if (parameters[i].type == PlayableParameterType.Enum)
                 {
