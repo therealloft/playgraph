@@ -33,5 +33,20 @@ namespace Playgraph
             string eventName)
         {
         }
+
+        public virtual void OnPlayableStateEvent(
+            PlayableAnimator animator,
+            string layerName,
+            string stateName,
+            string eventName,
+            PlayableStateEventType eventType,
+            PlayableStateEventTrigger trigger)
+        {
+            OnPlayableStateEvent(
+                animator,
+                layerName,
+                stateName,
+                eventName);
+        }
     }
 }

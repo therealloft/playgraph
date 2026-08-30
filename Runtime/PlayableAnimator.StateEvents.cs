@@ -27,7 +27,7 @@ namespace Playgraph
             }
 
             return matchingRule.timing == PlayableInterruptionTiming.Immediate ||
-                   HasReachedExitTime(currentState);
+                   currentState.Weight >= 0.999f;
         }
 
         private static bool TryGetMatchingInterruption(
@@ -49,12 +49,19 @@ namespace Playgraph
                 return false;
             }
 
+            if (incomingLayer != currentLayer &&
+                !incomingState.Definition.interruptOtherLayers)
+            {
+                return false;
+            }
+
             List<PlayableInterruption> interruptions =
                 incomingState.Definition.interruptions;
+            PlayableInterruption broadMatch = null;
             for (int i = 0; i < interruptions.Count; i++)
             {
                 PlayableInterruption rule = interruptions[i];
-                if (rule == null || !rule.enabled)
+                if (rule == null)
                     continue;
 
                 if (!InterruptionRuleMatches(
@@ -67,11 +74,19 @@ namespace Playgraph
                     continue;
                 }
 
-                matchingRule = rule;
-                return true;
+                if (rule.target == PlayableInterruptionTarget.State ||
+                    rule.target == PlayableInterruptionTarget.Self)
+                {
+                    matchingRule = rule;
+                    return true;
+                }
+
+                if (broadMatch == null)
+                    broadMatch = rule;
             }
 
-            return false;
+            matchingRule = broadMatch;
+            return matchingRule != null;
         }
 
         private static bool InterruptionRuleMatches(
@@ -84,17 +99,15 @@ namespace Playgraph
             bool sameLayer = incomingLayer == currentLayer;
             bool sameState = incomingState == currentState;
 
-            switch (rule.scope)
+            switch (rule.target)
             {
-                case PlayableInterruptionScope.Self:
+                case PlayableInterruptionTarget.Self:
                     return sameState;
-                case PlayableInterruptionScope.SameLayer:
+                case PlayableInterruptionTarget.AllStates:
                     return sameLayer && !sameState;
-                case PlayableInterruptionScope.OtherLayers:
+                case PlayableInterruptionTarget.AllStatesFromOtherLayers:
                     return !sameLayer;
-                case PlayableInterruptionScope.AllLayers:
-                    return true;
-                case PlayableInterruptionScope.SpecificState:
+                case PlayableInterruptionTarget.State:
                     return MatchesSpecificInterruption(
                         rule,
                         currentState,
@@ -109,24 +122,15 @@ namespace Playgraph
             RuntimeState currentState,
             RuntimeLayer currentLayer)
         {
-            bool layerMatches =
-                string.IsNullOrWhiteSpace(rule.layerName) ||
-                string.Equals(
-                    rule.layerName,
-                    currentLayer.Definition.name,
-                    StringComparison.OrdinalIgnoreCase);
-            bool stateMatches =
-                string.IsNullOrWhiteSpace(rule.stateName) ||
-                string.Equals(
-                    rule.stateName,
-                    currentState.Definition.name,
-                    StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(
-                    rule.stateName,
-                    currentState.Path,
-                    StringComparison.OrdinalIgnoreCase);
-
-            return layerMatches && stateMatches;
+            return currentLayer.Definition != null &&
+                   string.Equals(
+                       rule.layerName,
+                       currentLayer.Definition.name,
+                       StringComparison.OrdinalIgnoreCase) &&
+                   string.Equals(
+                       rule.stateName,
+                       currentState.Path,
+                       StringComparison.OrdinalIgnoreCase);
         }
 
         private bool HasReachedExitTime(RuntimeState state)
@@ -250,7 +254,54 @@ namespace Playgraph
             float normalizedTime = GetNormalizedStateTime(state);
             NotifyStateUpdate(layer, state, normalizedTime);
             DispatchStateEvents(layer, state, normalizedTime);
+            DispatchLoopBoundaryEvents(
+                layer,
+                state,
+                state.PreviousNormalizedTime,
+                normalizedTime);
             state.PreviousNormalizedTime = normalizedTime;
+        }
+
+        private void DispatchLoopBoundaryEvents(
+            RuntimeLayer layer,
+            RuntimeState state,
+            float previousNormalizedTime,
+            float normalizedTime)
+        {
+            if (state == null ||
+                state.Definition == null ||
+                normalizedTime <= previousNormalizedTime)
+            {
+                return;
+            }
+
+            float previousTime = Mathf.Max(0f, previousNormalizedTime);
+            float currentTime = Mathf.Max(0f, normalizedTime);
+            int completedLoops = Mathf.FloorToInt(currentTime) -
+                                 Mathf.FloorToInt(previousTime);
+            if (completedLoops <= 0)
+                return;
+
+            if (!state.Definition.loop)
+                completedLoops = previousTime < 1f && currentTime >= 1f ? 1 : 0;
+
+            for (int i = 0; i < completedLoops; i++)
+            {
+                DispatchStateBoundaryEvents(
+                    layer,
+                    state,
+                    PlayableStateEventType.StateExit,
+                    PlayableStateEventTrigger.OncePerLoop);
+
+                if (state.Definition.loop)
+                {
+                    DispatchStateBoundaryEvents(
+                        layer,
+                        state,
+                        PlayableStateEventType.StateEnter,
+                        PlayableStateEventTrigger.OncePerLoop);
+                }
+            }
         }
 
         private void DispatchStateEvents(
@@ -341,7 +392,13 @@ namespace Playgraph
             DispatchStateBoundaryEvents(
                 layer,
                 state,
-                PlayableStateEventType.StateEnter);
+                PlayableStateEventType.StateEnter,
+                PlayableStateEventTrigger.OncePerState);
+            DispatchStateBoundaryEvents(
+                layer,
+                state,
+                PlayableStateEventType.StateEnter,
+                PlayableStateEventTrigger.OncePerLoop);
         }
 
         private void NotifyStateUpdate(
@@ -402,13 +459,15 @@ namespace Playgraph
             DispatchStateBoundaryEvents(
                 layer,
                 state,
-                PlayableStateEventType.StateExit);
+                PlayableStateEventType.StateExit,
+                PlayableStateEventTrigger.OncePerState);
         }
 
         private void DispatchStateBoundaryEvents(
             RuntimeLayer layer,
             RuntimeState state,
-            PlayableStateEventType eventType)
+            PlayableStateEventType eventType,
+            PlayableStateEventTrigger trigger)
         {
             if (state.Definition.events == null || state.Definition.events.Count == 0)
                 return;
@@ -418,12 +477,16 @@ namespace Playgraph
             {
                 PlayableStateEvent stateEvent = state.Definition.events[i];
                 if (stateEvent == null || !stateEvent.enabled ||
-                    stateEvent.type != eventType || state.EventFired[i])
+                    stateEvent.type != eventType ||
+                    stateEvent.trigger != trigger ||
+                    (trigger == PlayableStateEventTrigger.OncePerState &&
+                     state.EventFired[i]))
                 {
                     continue;
                 }
 
-                state.EventFired[i] = true;
+                if (trigger == PlayableStateEventTrigger.OncePerState)
+                    state.EventFired[i] = true;
                 NotifyStateEvent(layer, state, stateEvent);
             }
         }
@@ -443,35 +506,86 @@ namespace Playgraph
             RuntimeState state,
             PlayableStateEvent stateEvent)
         {
-            if (stateEvent.callback != null)
+            if (state.Definition.behaviours != null)
             {
-                try
+                for (int i = 0; i < state.Definition.behaviours.Count; i++)
                 {
-                    stateEvent.callback.Invoke();
-                }
-                catch (Exception exception)
-                {
-                    Debug.LogException(exception, this);
+                    PlayableStateBehaviour behaviour =
+                        state.Definition.behaviours[i];
+                    if (behaviour == null)
+                        continue;
+
+                    try
+                    {
+                        behaviour.OnPlayableStateEvent(
+                            this,
+                            layer.Definition.name,
+                            state.Path,
+                            stateEvent.name,
+                            stateEvent.type,
+                            stateEvent.trigger);
+                    }
+                    catch (Exception exception)
+                    {
+                        Debug.LogException(exception, this);
+                    }
                 }
             }
 
-            if (state.Definition.behaviours == null)
+            NotifyAnimatorStateEvent(layer, state, stateEvent);
+        }
+
+        private void NotifyAnimatorStateEvent(
+            RuntimeLayer layer,
+            RuntimeState state,
+            PlayableStateEvent stateEvent)
+        {
+            string layerName = layer.Definition.name;
+            string stateName = state.Path;
+            Delegate[] handlers = StateEventRaised?.GetInvocationList();
+            if (handlers != null)
+            {
+                for (int i = 0; i < handlers.Length; i++)
+                {
+                    try
+                    {
+                        ((Action<
+                            string,
+                            string,
+                            string,
+                            PlayableStateEventType,
+                            PlayableStateEventTrigger>)handlers[i]).Invoke(
+                            layerName,
+                            stateName,
+                            stateEvent.name,
+                            stateEvent.type,
+                            stateEvent.trigger);
+                    }
+                    catch (Exception exception)
+                    {
+                        Debug.LogException(exception, this);
+                    }
+                }
+            }
+
+            if (eventBindings == null)
                 return;
 
-            for (int i = 0; i < state.Definition.behaviours.Count; i++)
+            for (int i = 0; i < eventBindings.Count; i++)
             {
-                PlayableStateBehaviour behaviour =
-                    state.Definition.behaviours[i];
-                if (behaviour == null)
+                PlayableAnimatorEventBinding binding = eventBindings[i];
+                if (binding == null ||
+                    !string.Equals(
+                        binding.EventName,
+                        stateEvent.name,
+                        StringComparison.Ordinal))
+                {
                     continue;
+                }
 
                 try
                 {
-                    behaviour.OnPlayableStateEvent(
-                        this,
-                        layer.Definition.name,
-                        state.Path,
-                        stateEvent.name);
+                    binding.Response?.Invoke();
                 }
                 catch (Exception exception)
                 {

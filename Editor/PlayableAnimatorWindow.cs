@@ -55,6 +55,16 @@ namespace Playgraph
             (int)PlayableStateEventType.StateEnter,
             (int)PlayableStateEventType.StateExit
         };
+        private static readonly string[] InterruptionTimingLabels =
+        {
+            "Wait Blend",
+            "Immediate"
+        };
+        private static readonly int[] InterruptionTimingValues =
+        {
+            (int)PlayableInterruptionTiming.WaitBlend,
+            (int)PlayableInterruptionTiming.Immediate
+        };
 
         private static readonly Color GridMajor = new Color(1f, 1f, 1f, 0.08f);
         private static readonly Color GridMinor = new Color(1f, 1f, 1f, 0.035f);
@@ -73,6 +83,8 @@ namespace Playgraph
         private const float BlendNodeRowHeight = 42f;
         private const float BlendNodeGap = 8f;
         private const float BlendNodeColumnWidth = 215f;
+        private const float PreviewGridStep = 0.5f;
+        private const float PreviewGridExtent = 100f;
 
         private readonly List<PlayableState> stateMachinePath =
             new List<PlayableState>();
@@ -98,6 +110,7 @@ namespace Playgraph
         private Vector2 parameterScroll;
         private Vector2 inspectorScroll;
         private Vector2 graphPan;
+        private Rect interruptionPopupAnchor;
         private Vector2 previewOrbit = new Vector2(145f, 12f);
         private float sidebarWidth = DefaultSidebarWidth;
         private float inspectorWidth = DefaultInspectorWidth;
@@ -112,9 +125,13 @@ namespace Playgraph
         private float previewPoseDuration = 1f;
         private float previewSpeed = 1f;
         private float previewZoom = 1f;
+        private float previewGridFloorY;
+        private float previewCameraRadius = 0.4f;
         private Vector3 previewBasePosition;
         private Quaternion previewBaseRotation = Quaternion.identity;
+        private Vector3 previewCameraCenterOffset;
         private Vector3 previewRootMotionOffset;
+        private float previewRootMotionSampleTime;
         private float previewBlendX;
         private float previewBlendY;
         private double lastPreviewUpdateTime;
@@ -131,6 +148,7 @@ namespace Playgraph
         private bool showPreview = true;
         private bool previewUseRuntimeTarget = true;
         private bool previewPlaying;
+        private bool previewWindowFocused;
         private bool parameterReorderUndoRecorded;
         private bool stateReorderUndoRecorded;
         private bool suspendPreviewForPlayModeChange;
@@ -162,6 +180,7 @@ namespace Playgraph
             EditorApplication.quitting += DisposePreviewResources;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
             EditorApplication.update += OnEditorUpdate;
+            previewWindowFocused = focusedWindow == this;
             PickSelection();
         }
 
@@ -180,6 +199,18 @@ namespace Playgraph
             DisposePreviewResources();
         }
 
+        private void OnFocus()
+        {
+            previewWindowFocused = true;
+            lastPreviewUpdateTime = EditorApplication.timeSinceStartup;
+        }
+
+        private void OnLostFocus()
+        {
+            previewWindowFocused = false;
+            lastPreviewUpdateTime = EditorApplication.timeSinceStartup;
+        }
+
         private void OnPlayModeStateChanged(PlayModeStateChange state)
         {
             if (state == PlayModeStateChange.ExitingEditMode ||
@@ -196,11 +227,6 @@ namespace Playgraph
             }
         }
 
-        private void Update()
-        {
-            TickPreviewAnimation();
-        }
-
         private void OnEditorUpdate()
         {
             TickPreviewAnimation();
@@ -208,7 +234,9 @@ namespace Playgraph
 
         private void TickPreviewAnimation()
         {
-            if (!previewPlaying || !showPreview)
+            if (!previewPlaying ||
+                !showPreview ||
+                !previewWindowFocused)
             {
                 lastPreviewUpdateTime = EditorApplication.timeSinceStartup;
                 return;
@@ -767,7 +795,9 @@ namespace Playgraph
             EditorGUILayout.BeginVertical(
                 GUILayout.Width(inspectorWidth),
                 GUILayout.ExpandHeight(true));
-            inspectorScroll = EditorGUILayout.BeginScrollView(inspectorScroll);
+            inspectorScroll = EditorGUILayout.BeginScrollView(
+                inspectorScroll,
+                GUILayout.ExpandHeight(true));
 
             EditorGUILayout.LabelField(state.DisplayName, EditorStyles.boldLabel);
 
@@ -792,7 +822,7 @@ namespace Playgraph
                     showInterruptions,
                     "Interruptions");
                 if (showInterruptions)
-                    DrawInterruptions(layer, state);
+                    DrawInterruptions(state);
 
                 showBehaviours = DrawSectionHeader(showBehaviours, "Behaviours");
                 if (showBehaviours)
@@ -803,6 +833,8 @@ namespace Playgraph
                     DrawEvents(state);
             }
 
+            EditorGUILayout.EndScrollView();
+
             if (!state.IsSubStateMachine)
             {
                 showPreview = DrawSectionHeader(showPreview, "Animation Preview");
@@ -810,7 +842,6 @@ namespace Playgraph
                     DrawAnimationPreview(state);
             }
 
-            EditorGUILayout.EndScrollView();
             EditorGUILayout.EndVertical();
         }
 
@@ -1044,7 +1075,7 @@ namespace Playgraph
             }
 
             EditorGUI.BeginChangeCheck();
-            DrawPreviewBlendControls(state);
+            bool blendValueChanged = DrawPreviewBlendControls(state);
 
             float duration = Mathf.Max(0.01f, GetPreviewDuration(state));
             previewPoseDuration = duration;
@@ -1067,7 +1098,7 @@ namespace Playgraph
                     GUILayout.Width(52f)))
             {
                 previewTime = 0f;
-                previewRootMotionTime = 0f;
+                ResetPreviewRootMotion(0f);
             }
 
             GUILayout.Label(
@@ -1090,11 +1121,15 @@ namespace Playgraph
             if (previewTimeChanged)
             {
                 previewTime = nextPreviewTime;
-                previewRootMotionTime = nextPreviewTime;
+                ResetPreviewRootMotion(nextPreviewTime);
             }
 
-            if (EditorGUI.EndChangeCheck() || previewTimeChanged)
+            if (EditorGUI.EndChangeCheck() ||
+                previewTimeChanged ||
+                blendValueChanged)
+            {
                 Repaint();
+            }
 
             float previewHeight = Mathf.Clamp(
                 position.height * 0.32f,
@@ -1108,38 +1143,55 @@ namespace Playgraph
             DrawPreviewScene(previewRect, state, source);
         }
 
-        private void DrawPreviewBlendControls(PlayableState state)
+        private bool DrawPreviewBlendControls(PlayableState state)
         {
             switch (state.output)
             {
                 case PlayableStateOutput.BlendTree1D:
                     SyncPreviewBlendValues(state);
+                    float nextBlendX;
                     using (new EditorGUI.DisabledScope(
                                Application.isPlaying && runtimeTarget != null))
                     {
-                        previewBlendX = EditorGUILayout.FloatField(
+                        nextBlendX = EditorGUILayout.FloatField(
                             state.blendParameterX,
                             previewBlendX);
                     }
 
-                    break;
+                    if (Mathf.Approximately(nextBlendX, previewBlendX))
+                        return false;
+
+                    previewBlendX = nextBlendX;
+                    return true;
 
                 case PlayableStateOutput.BlendTree2D:
                     SyncPreviewBlendValues(state);
+                    float nextBlendTreeX;
+                    float nextBlendTreeY;
                     using (new EditorGUI.DisabledScope(
                                Application.isPlaying && runtimeTarget != null))
                     {
                         EditorGUILayout.BeginHorizontal();
-                        previewBlendX = EditorGUILayout.FloatField(
+                        nextBlendTreeX = EditorGUILayout.FloatField(
                             state.blendParameterX,
                             previewBlendX);
-                        previewBlendY = EditorGUILayout.FloatField(
+                        nextBlendTreeY = EditorGUILayout.FloatField(
                             state.blendParameterY,
                             previewBlendY);
                         EditorGUILayout.EndHorizontal();
                     }
 
-                    break;
+                    if (Mathf.Approximately(nextBlendTreeX, previewBlendX) &&
+                        Mathf.Approximately(nextBlendTreeY, previewBlendY))
+                    {
+                        return false;
+                    }
+
+                    previewBlendX = nextBlendTreeX;
+                    previewBlendY = nextBlendTreeY;
+                    return true;
+                default:
+                    return false;
             }
         }
 
@@ -1246,6 +1298,16 @@ namespace Playgraph
             previewInstance = CreatePreviewInstance(sourceRoot);
             previewBasePosition = previewInstance.transform.position;
             previewBaseRotation = previewInstance.transform.rotation;
+            Bounds initialBounds = CalculatePreviewBounds(previewInstance);
+            previewGridFloorY = initialBounds.size == Vector3.zero
+                ? previewBasePosition.y + 0.01f
+                : Mathf.Min(initialBounds.min.y, previewBasePosition.y) + 0.01f;
+            previewCameraCenterOffset = initialBounds.size == Vector3.zero
+                ? Vector3.up
+                : initialBounds.center - previewBasePosition;
+            previewCameraRadius = initialBounds.size == Vector3.zero
+                ? 1f
+                : Mathf.Max(0.4f, initialBounds.extents.magnitude);
             previewRootMotionOffset = Vector3.zero;
             previewUtility.AddSingleGO(previewInstance);
             EnsurePreviewGrid();
@@ -1626,13 +1688,35 @@ namespace Playgraph
         private Vector3 GetPreviewRootMotionOffset(PlayableState state)
         {
             if (state == null || !state.applyRootMotion)
+            {
+                previewRootMotionOffset = Vector3.zero;
+                previewRootMotionSampleTime = previewRootMotionTime;
                 return Vector3.zero;
+            }
 
-            Vector3 offset = state.output == PlayableStateOutput.Playlist
-                ? GetPreviewPlaylistRootMotionOffset(
-                    state,
-                    previewRootMotionTime)
-                : GetPreviewRootMotionVelocity(state) * previewRootMotionTime;
+            float currentTime = Mathf.Max(0f, previewRootMotionTime);
+            if (currentTime < previewRootMotionSampleTime)
+            {
+                previewRootMotionOffset = Vector3.zero;
+                previewRootMotionSampleTime = 0f;
+            }
+
+            if (state.output == PlayableStateOutput.Playlist)
+            {
+                previewRootMotionOffset =
+                    GetPreviewPlaylistRootMotionOffset(state, currentTime);
+            }
+            else
+            {
+                float deltaTime = Mathf.Max(
+                    0f,
+                    currentTime - previewRootMotionSampleTime);
+                previewRootMotionOffset +=
+                    GetPreviewRootMotionVelocity(state) * deltaTime;
+            }
+
+            previewRootMotionSampleTime = currentTime;
+            Vector3 offset = previewRootMotionOffset;
             if (!state.rootMotionPositionXZ)
             {
                 offset.x = 0f;
@@ -1643,6 +1727,13 @@ namespace Playgraph
                 offset.y = 0f;
 
             return offset;
+        }
+
+        private void ResetPreviewRootMotion(float time)
+        {
+            previewRootMotionTime = Mathf.Max(0f, time);
+            previewRootMotionOffset = Vector3.zero;
+            previewRootMotionSampleTime = 0f;
         }
 
         private Vector3 GetPreviewRootMotionVelocity(PlayableState state)
@@ -1797,10 +1888,10 @@ namespace Playgraph
 
         private void RenderPreview(Rect previewRect, Bounds bounds)
         {
-            UpdatePreviewGrid(bounds);
+            UpdatePreviewGrid();
 
             Camera camera = previewUtility.camera;
-            float radius = Mathf.Max(0.4f, bounds.extents.magnitude);
+            float radius = previewCameraRadius;
             Quaternion rotation = Quaternion.Euler(
                 previewOrbit.y,
                 previewOrbit.x,
@@ -1808,8 +1899,11 @@ namespace Playgraph
             Vector3 forward = rotation * Vector3.forward;
             float zoomT = Mathf.InverseLerp(0f, 1.5f, previewZoom);
             float distance = radius * Mathf.Lerp(1.65f, 8.8f, zoomT);
+            Vector3 cameraTarget = previewInstance != null
+                ? previewInstance.transform.position + previewCameraCenterOffset
+                : bounds.center;
 
-            camera.transform.position = bounds.center - forward * distance;
+            camera.transform.position = cameraTarget - forward * distance;
             camera.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
             camera.nearClipPlane = Mathf.Max(0.01f, distance - radius * 3f);
             camera.farClipPlane = distance + radius * 5f;
@@ -1873,26 +1967,18 @@ namespace Playgraph
             previewUtility.AddSingleGO(previewGrid);
         }
 
-        private void UpdatePreviewGrid(Bounds bounds)
+        private void UpdatePreviewGrid()
         {
             EnsurePreviewGrid();
             if (previewGridMesh == null)
                 return;
+            if (previewGridMesh.vertexCount > 0)
+                return;
 
-            Vector3 gridCenter = previewInstance != null
-                ? previewBasePosition
-                : bounds.center;
-            float horizontalExtent = Mathf.Max(bounds.extents.x, bounds.extents.z);
-            float travelExtent = Mathf.Max(
-                Mathf.Abs(previewRootMotionOffset.x),
-                Mathf.Abs(previewRootMotionOffset.z));
-            float extent = Mathf.Max(
-                3f,
-                horizontalExtent * 4f,
-                travelExtent + horizontalExtent * 3f);
-            float step = Mathf.Max(0.25f, extent / 12f);
-            int lineRadius = Mathf.CeilToInt(extent / step);
-            float floorY = Mathf.Min(bounds.min.y, gridCenter.y) + 0.01f;
+            Vector3 gridCenter = previewBasePosition;
+            float extent = PreviewGridExtent;
+            int lineRadius = Mathf.CeilToInt(extent / PreviewGridStep);
+            float floorY = previewGridFloorY;
             Vector3 center = new Vector3(gridCenter.x, floorY, gridCenter.z);
 
             List<Vector3> vertices = new List<Vector3>();
@@ -1900,11 +1986,10 @@ namespace Playgraph
             List<int> indices = new List<int>();
             Color minor = new Color(1f, 1f, 1f, 0.14f);
             Color major = new Color(1f, 1f, 1f, 0.28f);
-            Color trail = new Color(Accent.r, Accent.g, Accent.b, 0.9f);
 
             for (int i = -lineRadius; i <= lineRadius; i++)
             {
-                float offset = i * step;
+                float offset = i * PreviewGridStep;
                 Color lineColor = i == 0 || i % 4 == 0 ? major : minor;
 
                 AddPreviewGridLine(
@@ -1921,21 +2006,6 @@ namespace Playgraph
                     new Vector3(center.x - extent, floorY, center.z + offset),
                     new Vector3(center.x + extent, floorY, center.z + offset),
                     lineColor);
-            }
-
-            if (previewRootMotionOffset.sqrMagnitude > 0.0001f)
-            {
-                Vector3 rootMotionEnd = center + new Vector3(
-                    previewRootMotionOffset.x,
-                    0.03f,
-                    previewRootMotionOffset.z);
-                AddPreviewGridLine(
-                    vertices,
-                    colors,
-                    indices,
-                    center + Vector3.up * 0.03f,
-                    rootMotionEnd,
-                    trail);
             }
 
             previewGridMesh.Clear();
@@ -2684,12 +2754,52 @@ namespace Playgraph
             }
         }
 
-        private void DrawInterruptions(
-            PlayableLayer ownerLayer,
-            PlayableState state)
+        private void DrawInterruptions(PlayableState state)
         {
             if (state.interruptions == null)
                 state.interruptions = new List<PlayableInterruption>();
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            bool showTargetPopup = GUILayout.Button(
+                "Add States to Interrupt",
+                EditorStyles.popup,
+                GUILayout.MaxWidth(280f));
+            Rect targetPopupRect = GUILayoutUtility.GetLastRect();
+            if (Event.current.type == EventType.Repaint)
+                interruptionPopupAnchor = targetPopupRect;
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+
+            if (showTargetPopup)
+            {
+                PopupWindow.Show(
+                    interruptionPopupAnchor,
+                    new InterruptionTargetPopup(
+                        graphAsset,
+                        state,
+                        Repaint));
+            }
+
+            GUILayout.Space(3f);
+
+            if (state.interruptions.Count == 0)
+            {
+                EditorGUILayout.LabelField(
+                    "No interruption targets selected.",
+                    EditorStyles.miniLabel);
+            }
+            else
+            {
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.LabelField("Target", EditorStyles.miniBoldLabel);
+                EditorGUILayout.LabelField(
+                    "Type",
+                    EditorStyles.miniBoldLabel,
+                    GUILayout.Width(96f));
+                GUILayout.Space(24f);
+                EditorGUILayout.EndHorizontal();
+            }
 
             for (int i = 0; i < state.interruptions.Count; i++)
             {
@@ -2701,44 +2811,32 @@ namespace Playgraph
                 }
 
                 bool remove = false;
-                EditorGUILayout.BeginVertical(EditorStyles.helpBox);
-                EditorGUILayout.BeginHorizontal();
-                rule.enabled = EditorGUILayout.Toggle(
-                    rule.enabled,
-                    GUILayout.Width(18f));
-                rule.scope =
-                    (PlayableInterruptionScope)EditorGUILayout.EnumPopup(
-                        rule.scope);
-                if (GUILayout.Button("X", GUILayout.Width(24f)))
+                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+                EditorGUILayout.LabelField(GetInterruptionTargetLabel(rule));
+
+                PlayableInterruptionTiming nextTiming =
+                    (PlayableInterruptionTiming)EditorGUILayout.IntPopup(
+                        (int)rule.timing,
+                        InterruptionTimingLabels,
+                        InterruptionTimingValues,
+                        GUILayout.Width(96f));
+                if (nextTiming != rule.timing)
+                {
+                    Undo.RecordObject(
+                        graphAsset,
+                        "Change Playable Animator Interruption Type");
+                    rule.timing = nextTiming;
+                    EditorUtility.SetDirty(graphAsset);
+                }
+
+                if (GUILayout.Button(
+                        new GUIContent("X", "Remove interruption target"),
+                        EditorStyles.miniButton,
+                        GUILayout.Width(24f)))
+                {
                     remove = true;
+                }
                 EditorGUILayout.EndHorizontal();
-
-                rule.timing =
-                    (PlayableInterruptionTiming)EditorGUILayout.EnumPopup(
-                        "Timing",
-                        rule.timing);
-                rule.fadeDurationOverride = Mathf.Max(
-                    -1f,
-                    EditorGUILayout.FloatField(
-                        "Blend Override",
-                        rule.fadeDurationOverride));
-
-                if (rule.scope == PlayableInterruptionScope.SpecificState)
-                {
-                    rule.layerName = LayerNamePopup(
-                        "Layer",
-                        rule.layerName);
-                    rule.stateName = StateNamePopup(
-                        rule.layerName,
-                        rule.stateName);
-                }
-                else if (rule.scope == PlayableInterruptionScope.SameLayer)
-                {
-                    rule.layerName = ownerLayer != null ? ownerLayer.name : string.Empty;
-                    rule.stateName = string.Empty;
-                }
-
-                EditorGUILayout.EndVertical();
 
                 if (remove)
                 {
@@ -2749,32 +2847,25 @@ namespace Playgraph
                 }
             }
 
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Add Same Layer"))
-                AddInterruption(
-                    state,
-                    PlayableInterruptionScope.SameLayer);
-            if (GUILayout.Button("Add Self"))
-                AddInterruption(
-                    state,
-                    PlayableInterruptionScope.Self);
-            EditorGUILayout.EndHorizontal();
+            GUILayout.Space(4f);
+            Rect divider = GUILayoutUtility.GetRect(
+                1f,
+                1f,
+                GUILayout.ExpandWidth(true));
+            EditorGUI.DrawRect(divider, new Color(1f, 1f, 1f, 0.16f));
+            GUILayout.Space(3f);
 
-            EditorGUILayout.BeginHorizontal();
-            if (GUILayout.Button("Add Other Layers"))
-                AddInterruption(
-                    state,
-                    PlayableInterruptionScope.OtherLayers);
-            if (GUILayout.Button("Add All States"))
-                AddInterruption(
-                    state,
-                    PlayableInterruptionScope.AllLayers);
-            EditorGUILayout.EndHorizontal();
-
-            if (GUILayout.Button("Add Specific State"))
-                AddInterruption(
-                    state,
-                    PlayableInterruptionScope.SpecificState);
+            bool interruptOtherLayers = EditorGUILayout.Toggle(
+                "Interrupt Other Layers",
+                state.interruptOtherLayers);
+            if (interruptOtherLayers != state.interruptOtherLayers)
+            {
+                Undo.RecordObject(
+                    graphAsset,
+                    "Change Cross-Layer Interruptions");
+                state.interruptOtherLayers = interruptOtherLayers;
+                EditorUtility.SetDirty(graphAsset);
+            }
         }
 
         private void DrawBehaviours(PlayableState state)
@@ -2840,6 +2931,10 @@ namespace Playgraph
                 stateEvent.type = DrawStateEventTypePopup(
                     state,
                     stateEvent.type);
+                stateEvent.trigger =
+                    (PlayableStateEventTrigger)EditorGUILayout.EnumPopup(
+                        "Repeat",
+                        stateEvent.trigger);
                 if (stateEvent.type == PlayableStateEventType.NormalizedTime)
                 {
                     stateEvent.normalizedTime = Mathf.Max(
@@ -2847,13 +2942,8 @@ namespace Playgraph
                         EditorGUILayout.FloatField(
                             "Normalized Time",
                             stateEvent.normalizedTime));
-                    stateEvent.trigger =
-                        (PlayableStateEventTrigger)EditorGUILayout.EnumPopup(
-                            "Trigger",
-                            stateEvent.trigger);
                 }
 
-                DrawStateEventCallback(i);
                 EditorGUILayout.EndVertical();
 
                 if (remove)
@@ -2928,61 +3018,29 @@ namespace Playgraph
                     graphAsset.showInPlayableGraphVisualizer);
         }
 
-        private void AddInterruption(
-            PlayableState state,
-            PlayableInterruptionScope scope)
+        private static string GetInterruptionTargetLabel(
+            PlayableInterruption rule)
         {
-            if (state == null)
-                return;
+            if (rule == null)
+                return "(missing)";
 
-            if (state.interruptions == null)
-                state.interruptions = new List<PlayableInterruption>();
-
-            Undo.RecordObject(graphAsset, "Add Playable Animator Interruption");
-            state.interruptions.Add(new PlayableInterruption
+            switch (rule.target)
             {
-                scope = scope
-            });
-            EditorUtility.SetDirty(graphAsset);
-        }
-
-        private void DrawStateEventCallback(int eventIndex)
-        {
-            if (graphAsset == null ||
-                eventIndex < 0 ||
-                selectedLayer < 0 ||
-                selectedLayer >= graphAsset.layers.Count)
-            {
-                return;
-            }
-
-            string statePropertyPath = GetSelectedStateSerializedPath();
-            if (string.IsNullOrWhiteSpace(statePropertyPath))
-                return;
-
-            SerializedObject serializedGraph = new SerializedObject(graphAsset);
-            serializedGraph.Update();
-            SerializedProperty callback = serializedGraph.FindProperty(
-                statePropertyPath +
-                ".events.Array.data[" + eventIndex +
-                "].callback");
-
-            if (callback == null)
-                return;
-
-            EditorGUI.BeginChangeCheck();
-            EditorGUILayout.PropertyField(
-                callback,
-                new GUIContent("Callback"),
-                true);
-            if (EditorGUI.EndChangeCheck())
-            {
-                serializedGraph.ApplyModifiedProperties();
-                EditorUtility.SetDirty(graphAsset);
-            }
-            else
-            {
-                serializedGraph.ApplyModifiedProperties();
+                case PlayableInterruptionTarget.AllStates:
+                    return "All States";
+                case PlayableInterruptionTarget.AllStatesFromOtherLayers:
+                    return "All States From Other Layers";
+                case PlayableInterruptionTarget.Self:
+                    return "Self";
+                case PlayableInterruptionTarget.State:
+                    string path = string.IsNullOrWhiteSpace(rule.stateName)
+                        ? "(missing state)"
+                        : rule.stateName;
+                    return string.IsNullOrWhiteSpace(rule.layerName)
+                        ? path
+                        : rule.layerName + " / " + path;
+                default:
+                    return "(unknown)";
             }
         }
 
@@ -3092,13 +3150,10 @@ namespace Playgraph
             float lineHeight = EditorGUIUtility.singleLineHeight;
             float spacing = EditorGUIUtility.standardVerticalSpacing;
             if (index < 0 || index >= graphAsset.parameters.Count)
-                return 8f + lineHeight * 2f + spacing;
+                return 8f + lineHeight;
 
             PlayableParameter parameter = graphAsset.parameters[index];
-            bool hasDefault = parameter == null ||
-                              parameter.type != PlayableParameterType.Trigger;
-            float height = 8f + lineHeight * (hasDefault ? 2f : 1f) +
-                           (hasDefault ? spacing : 0f);
+            float height = 8f + lineHeight;
             if (parameter == null || parameter.type != PlayableParameterType.Enum)
                 return height;
 
@@ -3145,27 +3200,40 @@ namespace Playgraph
                 lineHeight);
 
             const float removeWidth = 24f;
-            const float typeWidth = 82f;
-            Rect removeRect = new Rect(
-                lineRect.xMax - removeWidth,
-                lineRect.y,
-                removeWidth,
-                lineHeight);
-            Rect typeRect = new Rect(
-                removeRect.x - spacing - typeWidth,
-                lineRect.y,
-                typeWidth,
-                lineHeight);
+            float fieldWidth = Mathf.Max(
+                0f,
+                lineRect.width - removeWidth - spacing * 3f);
+            float typeWidth = Mathf.Clamp(fieldWidth * 0.28f, 60f, 92f);
+            float defaultWidth = Mathf.Clamp(fieldWidth * 0.28f, 55f, 96f);
+            float nameWidth = Mathf.Max(
+                40f,
+                fieldWidth - typeWidth - defaultWidth);
             Rect nameRect = new Rect(
                 lineRect.x,
                 lineRect.y,
-                Mathf.Max(40f, typeRect.x - spacing - lineRect.x),
+                nameWidth,
+                lineHeight);
+            Rect typeRect = new Rect(
+                nameRect.xMax + spacing,
+                lineRect.y,
+                typeWidth,
+                lineHeight);
+            Rect defaultRect = new Rect(
+                typeRect.xMax + spacing,
+                lineRect.y,
+                defaultWidth,
+                lineHeight);
+            Rect removeRect = new Rect(
+                defaultRect.xMax + spacing,
+                lineRect.y,
+                removeWidth,
                 lineHeight);
 
             parameter.name = EditorGUI.TextField(nameRect, parameter.name);
             parameter.type = (PlayableParameterType)EditorGUI.EnumPopup(
                 typeRect,
                 parameter.type);
+            DrawParameterDefaultValue(defaultRect, parameter);
             if (GUI.Button(
                     removeRect,
                     new GUIContent("X", "Remove parameter"),
@@ -3173,12 +3241,6 @@ namespace Playgraph
             {
                 pendingParameterRemoval = index;
             }
-
-            if (parameter.type == PlayableParameterType.Trigger)
-                return;
-
-            lineRect.y += lineHeight + spacing;
-            DrawParameterDefault(lineRect, parameter);
 
             if (parameter.type != PlayableParameterType.Enum)
                 return;
@@ -3188,33 +3250,20 @@ namespace Playgraph
             DrawParameterEnumOptions(lineRect, parameter);
         }
 
-        private void DrawParameterDefault(
+        private void DrawParameterDefaultValue(
             Rect rect,
             PlayableParameter parameter)
         {
-            const float labelWidth = 48f;
-            Rect labelRect = new Rect(
-                rect.x,
-                rect.y,
-                labelWidth,
-                rect.height);
-            Rect valueRect = new Rect(
-                labelRect.xMax,
-                rect.y,
-                rect.width - labelWidth,
-                rect.height);
-            EditorGUI.LabelField(labelRect, "Default", EditorStyles.miniLabel);
-
             switch (parameter.type)
             {
                 case PlayableParameterType.Bool:
                     parameter.boolValue = EditorGUI.Toggle(
-                        new Rect(valueRect.x, valueRect.y, 18f, valueRect.height),
+                        new Rect(rect.x, rect.y, 18f, rect.height),
                         parameter.boolValue);
                     break;
                 case PlayableParameterType.Integer:
                     parameter.intValue = EditorGUI.IntField(
-                        valueRect,
+                        rect,
                         parameter.intValue);
                     break;
                 case PlayableParameterType.Enum:
@@ -3223,14 +3272,20 @@ namespace Playgraph
                         0,
                         parameter.enumOptions.IndexOf(parameter.enumValue));
                     int nextIndex = EditorGUI.Popup(
-                        valueRect,
+                        rect,
                         currentIndex,
                         parameter.enumOptions.ToArray());
                     parameter.enumValue = parameter.enumOptions[nextIndex];
                     break;
+                case PlayableParameterType.Trigger:
+                    EditorGUI.LabelField(
+                        rect,
+                        "-",
+                        EditorStyles.centeredGreyMiniLabel);
+                    break;
                 default:
                     parameter.floatValue = EditorGUI.FloatField(
-                        valueRect,
+                        rect,
                         parameter.floatValue);
                     break;
             }
@@ -4211,7 +4266,11 @@ namespace Playgraph
             previewSignature = 0;
             previewBasePosition = Vector3.zero;
             previewBaseRotation = Quaternion.identity;
+            previewGridFloorY = 0f;
+            previewCameraRadius = 0.4f;
+            previewCameraCenterOffset = Vector3.zero;
             previewRootMotionOffset = Vector3.zero;
+            previewRootMotionSampleTime = 0f;
             previewRootMotionTime = previewTime;
         }
 

@@ -30,7 +30,6 @@ namespace Playgraph
             }
 
             if (desiredState != null &&
-                desiredState != layer.ActiveState &&
                 CanChangeState(layer, layer.ActiveState, desiredState))
             {
                 EnterState(layer, desiredState);
@@ -371,11 +370,25 @@ namespace Playgraph
             RuntimeState currentState,
             RuntimeState desiredState)
         {
-            if (desiredState == null || currentState == desiredState)
+            if (desiredState == null)
                 return false;
 
             if (currentState == null)
                 return true;
+
+            if (currentState == desiredState)
+            {
+                return parameterStore.HasActiveTriggerCondition(
+                           desiredState.Definition != null
+                               ? desiredState.Definition.conditions
+                               : null) &&
+                       CanInterruptNow(
+                           desiredState,
+                           layer,
+                           currentState,
+                           layer,
+                           out _);
+            }
 
             if (parameterStore.HasActiveTriggerCondition(
                     desiredState.Definition != null
@@ -430,8 +443,13 @@ namespace Playgraph
             RuntimeLayer sourceLayer,
             RuntimeState incomingState)
         {
-            if (sourceLayer == null || incomingState == null)
+            if (sourceLayer == null ||
+                incomingState == null ||
+                incomingState.Definition == null ||
+                !incomingState.Definition.interruptOtherLayers)
+            {
                 return;
+            }
 
             for (int i = 0; i < runtimeLayers.Count; i++)
             {
@@ -448,14 +466,7 @@ namespace Playgraph
                         sourceLayer,
                         targetLayer.ActiveState,
                         targetLayer,
-                        out PlayableInterruption rule))
-                {
-                    continue;
-                }
-
-                if (rule.scope != PlayableInterruptionScope.OtherLayers &&
-                    rule.scope != PlayableInterruptionScope.AllLayers &&
-                    rule.scope != PlayableInterruptionScope.SpecificState)
+                        out _))
                 {
                     continue;
                 }
@@ -467,8 +478,7 @@ namespace Playgraph
                         targetLayer,
                         defaultState,
                         false,
-                        false,
-                        rule.fadeDurationOverride);
+                        false);
                 }
             }
         }

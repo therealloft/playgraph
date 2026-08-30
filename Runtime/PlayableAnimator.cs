@@ -2,13 +2,31 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Animations;
+using UnityEngine.Events;
 using UnityEngine.Playables;
 
 namespace Playgraph
 {
+    [Serializable]
+    public sealed class PlayableAnimatorEventBinding
+    {
+        [SerializeField] private string eventName = "Event";
+        [SerializeField] private UnityEvent response = new UnityEvent();
+
+        public string EventName => eventName;
+        public UnityEvent Response => response;
+
+        internal void EnsureDefaults()
+        {
+            if (response == null)
+                response = new UnityEvent();
+        }
+    }
+
     [DefaultExecutionOrder(56)]
     [DisallowMultipleComponent]
     [RequireComponent(typeof(Animator))]
+    [AddComponentMenu("Play Graph/Playable Animator")]
     public sealed partial class PlayableAnimator : MonoBehaviour
     {
         [Header("References")]
@@ -20,6 +38,10 @@ namespace Playgraph
         [SerializeField] private bool clearAnimatorController = true;
         [SerializeField] private bool showInPlayableGraphVisualizer = true;
         [SerializeField] private bool applyRootMotionToTransform = true;
+
+        [Header("Events")]
+        [SerializeField] private List<PlayableAnimatorEventBinding> eventBindings =
+            new List<PlayableAnimatorEventBinding>();
 
         private readonly PlayableParameterStore parameterStore =
             new PlayableParameterStore();
@@ -53,7 +75,16 @@ namespace Playgraph
             set => applyRootMotionToTransform = value;
         }
 
+        public IReadOnlyList<PlayableAnimatorEventBinding> EventBindings =>
+            eventBindings;
+
         public event Action<Vector3, Quaternion> RootMotionEvaluated;
+        public event Action<
+            string,
+            string,
+            string,
+            PlayableStateEventType,
+            PlayableStateEventTrigger> StateEventRaised;
         public static event Action<PlayableGraph>
             GraphVisualizationRequested;
         public static event Action<PlayableGraph>
@@ -62,12 +93,15 @@ namespace Playgraph
         private void Reset()
         {
             animator = GetComponent<Animator>();
+            EnsureEventBindings();
         }
 
         private void OnValidate()
         {
             if (animator == null)
                 animator = GetComponent<Animator>();
+
+            EnsureEventBindings();
         }
 
         private void OnEnable()
@@ -100,6 +134,7 @@ namespace Playgraph
         public void Initialize()
         {
             DestroyGraph();
+            EnsureEventBindings();
 
             if (animator == null)
                 animator = GetComponent<Animator>();
@@ -146,6 +181,15 @@ namespace Playgraph
                     GraphVisualizationRequested,
                     playableGraph);
             }
+        }
+
+        private void EnsureEventBindings()
+        {
+            if (eventBindings == null)
+                eventBindings = new List<PlayableAnimatorEventBinding>();
+
+            for (int i = 0; i < eventBindings.Count; i++)
+                eventBindings[i]?.EnsureDefaults();
         }
 
         public void RebuildGraph()

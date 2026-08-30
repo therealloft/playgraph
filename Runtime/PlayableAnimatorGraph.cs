@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.Events;
 
 namespace Playgraph
 {
@@ -47,19 +46,18 @@ namespace Playgraph
         FreeformCartesian
     }
 
-    public enum PlayableInterruptionScope
+    public enum PlayableInterruptionTarget
     {
-        SameLayer,
+        AllStates,
         Self,
-        OtherLayers,
-        AllLayers,
-        SpecificState
+        State,
+        AllStatesFromOtherLayers
     }
 
     public enum PlayableInterruptionTiming
     {
         Immediate,
-        AfterExitTime
+        WaitBlend
     }
 
     public enum PlayableStateEventType
@@ -105,14 +103,12 @@ namespace Playgraph
     [Serializable]
     public sealed class PlayableInterruption
     {
-        public bool enabled = true;
-        public PlayableInterruptionScope scope =
-            PlayableInterruptionScope.SameLayer;
+        public PlayableInterruptionTarget target =
+            PlayableInterruptionTarget.AllStates;
         public PlayableInterruptionTiming timing =
             PlayableInterruptionTiming.Immediate;
         public string layerName;
         public string stateName;
-        public float fadeDurationOverride = -1f;
     }
 
     [Serializable]
@@ -125,7 +121,6 @@ namespace Playgraph
         public PlayableStateEventTrigger trigger =
             PlayableStateEventTrigger.OncePerState;
         [Min(0f)] public float normalizedTime;
-        public UnityEvent callback = new UnityEvent();
     }
 
     [Serializable]
@@ -414,6 +409,7 @@ namespace Playgraph
             new List<PlayableCondition>();
         public List<PlayableInterruption> interruptions =
             new List<PlayableInterruption>();
+        public bool interruptOtherLayers;
         public List<PlayableStateBehaviour> behaviours =
             new List<PlayableStateBehaviour>();
         public List<PlayableStateEvent> events =
@@ -548,13 +544,6 @@ namespace Playgraph
                     state.events = new List<PlayableStateEvent>();
                 if (state.subStates == null)
                     state.subStates = new List<PlayableState>();
-
-                for (int j = 0; j < state.events.Count; j++)
-                {
-                    PlayableStateEvent stateEvent = state.events[j];
-                    if (stateEvent != null && stateEvent.callback == null)
-                        stateEvent.callback = new UnityEvent();
-                }
 
                 if (state.IsSubStateMachine)
                     EnsureStateDefaults(state.subStates, true, "State 1");
